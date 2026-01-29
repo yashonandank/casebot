@@ -14,7 +14,7 @@ def generate_report(
     session_id: int,
     case_id: int,
     student_id: int,
-    provider: str = "anthropic"
+    provider: str = "openai"
 ) -> Dict:
     """
     Generate final feedback report for student.

@@ -70,7 +70,7 @@ def upload_case_file(case_id: int, uploaded_file) -> str:
 def generate_blueprint(
     case_id: int,
     professor_id: int,
-    provider: str = "anthropic"
+    provider: str = "openai"
 ) -> Dict:
     """
     Generate initial blueprint using LLM.

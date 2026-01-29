@@ -137,7 +137,7 @@ def process_chat_turn(
     case_id: int,
     student_message: str,
     student_id: int,
-    provider: str = "anthropic"
+    provider: str = "openai"
 ) -> Dict:
     """
     Process one chat turn: retrieve context, call LLM, update state.
@@ -209,7 +209,7 @@ def submit_checkpoint(
     checkpoint_key: str,
     submission_text: str,
     student_id: int,
-    provider: str = "anthropic"
+    provider: str = "openai"
 ) -> Dict:
     """
     Evaluate a checkpoint submission.

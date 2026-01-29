@@ -101,17 +101,39 @@ if role == "Professor":
                 })
         
         st.write("**Rubric** (scoring categories)")
-        rubric_categories = st.text_area(
-            "Categories (JSON format)",
-            placeholder='{"Decision Quality": {"weight": 0.4}, "Analysis": {"weight": 0.3}, "Communication": {"weight": 0.3}}',
+        st.caption("Enter each criterion on a new line. Example: Decision Quality | 40")
+        rubric_text = st.text_area(
+            "Criteria (one per line: 'Name | Weight %')",
+            placeholder='Decision Quality | 40\nAnalysis | 35\nCommunication | 25',
             height=100
         )
         
-        try:
-            rubric = json.loads(rubric_categories) if rubric_categories.strip() else {}
-        except json.JSONDecodeError:
-            st.error("Invalid JSON in rubric categories")
-            rubric = {}
+        # Convert text format to JSON format
+        rubric = {}
+        if rubric_text.strip():
+            try:
+                total_weight = 0
+                for line in rubric_text.split('\n'):
+                    line = line.strip()
+                    if not line or '|' not in line:
+                        continue
+                    parts = line.split('|')
+                    if len(parts) == 2:
+                        category = parts[0].strip()
+                        weight = float(parts[1].strip()) / 100  # Convert percentage to decimal
+                        rubric[category] = {"weight": weight}
+                        total_weight += weight
+                
+                if rubric and total_weight > 0:
+                    # Normalize weights to sum to 1.0
+                    for category in rubric:
+                        rubric[category]["weight"] = rubric[category]["weight"] / total_weight
+                elif rubric:
+                    st.error("Rubric weights must sum to more than 0")
+                    rubric = {}
+            except ValueError:
+                st.error("Invalid format. Use: 'Category Name | Weight %' (e.g., 'Decision Quality | 40')")
+                rubric = {}
         
         professor_instructions = st.text_area(
             "Instructions for AI Blueprint Generator",

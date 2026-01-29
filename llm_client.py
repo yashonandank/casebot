@@ -14,6 +14,10 @@ class LLMClient:
     def _load_secrets(self):
         """Load API keys from environment or Streamlit secrets."""
         try:
+            # Try to get provider from secrets, default to openai
+            provider = st.secrets.get("LLM_PROVIDER", "openai") if hasattr(st, 'secrets') else os.getenv("LLM_PROVIDER", "openai")
+            self.provider = provider
+            
             if self.provider == "anthropic":
                 self.api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
                 if not self.api_key:
@@ -149,6 +153,6 @@ Please repair it to be valid JSON and return ONLY the corrected JSON:
                 raise ValueError(f"Could not parse or repair JSON: {str(e)}")
 
 
-def get_llm_client(provider: str = "anthropic") -> LLMClient:
-    """Factory function to get LLM client."""
+def get_llm_client(provider: str = "openai") -> LLMClient:
+    """Factory function to get LLM client. Defaults to OpenAI."""
     return LLMClient(provider)
