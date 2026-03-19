@@ -175,6 +175,171 @@ with st.sidebar:
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SHARED: Case Chat Renderer (semi-guided, phase-by-phase)
+# Must be defined before the routing blocks that call it.
+# ══════════════════════════════════════════════════════════════════════════════
+def _render_case_chat(session_id: int, case_id: int, user_id: int, is_test: bool = False):
+    session = get_session(session_id)
+    case = get_case(case_id)
+    blueprint = get_latest_blueprint(case_id)
+
+    if not session or not case or not blueprint:
+        st.error("Session or case data not found.")
+        return
+
+    state = session["state"]
+    phases = blueprint.get("phases", [])
+    total_cps = sum(len(p.get("checkpoints", [])) for p in phases)
+    completed_cps = len(state.get("completed_checkpoints", []))
+
+    st.markdown(f"<h2>{case['title']}</h2>", unsafe_allow_html=True)
+
+    # Progress bar
+    pct = int((completed_cps / total_cps) * 100) if total_cps > 0 else 0
+    phase_num = state.get("current_phase", 1)
+    phase_title = next(
+        (p.get("phase_title", f"Phase {p['phase_id']}") for p in phases
+         if p.get("phase_id") == phase_num), f"Phase {phase_num}"
+    )
+    st.markdown(f"""
+    <div style='margin-bottom:1.5rem;'>
+        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem;'>
+            <span style='font-size:.8rem;font-weight:600;color:#6a6460;text-transform:uppercase;
+                letter-spacing:.8px;'>{phase_title}</span>
+            <span style='font-size:.8rem;color:#8b8680;'>
+                {completed_cps}/{total_cps} checkpoints</span>
+        </div>
+        <div class='progress-bar-wrap'>
+            <div class='progress-bar-fill' style='width:{pct}%;'></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Phase intro — show once when phase starts
+    if not state.get("phase_introduced"):
+        intro = get_phase_intro(blueprint, phase_num)
+        if intro:
+            st.markdown(f"""
+            <div class='phase-header'>
+                <div class='phase-num'>Phase {phase_num} · {phase_title}</div>
+                <div class='phase-title' style='font-size:1rem;margin-top:.3rem;color:#5a5a5a;
+                    font-family:"DM Sans",sans-serif;font-weight:400;'>{intro}</div>
+            </div>""", unsafe_allow_html=True)
+            state["phase_introduced"] = True
+            save_session_state(session_id, state)
+
+    # Chat transcript
+    transcript = get_session_transcript(session_id)
+    for msg in transcript:
+        avatar = "🎓" if msg["role"] == "assistant" else "👤"
+        with st.chat_message(msg["role"] if msg["role"] != "student" else "user",
+                             avatar=avatar if msg["role"] == "assistant" else None):
+            st.markdown(msg["content"])
+            if msg.get("citations"):
+                st.caption(f"Sources: chunks {', '.join(map(str, msg['citations']))}")
+
+    # Current checkpoint
+    current_cp = get_current_checkpoint(blueprint, state)
+
+    if current_cp and current_cp["checkpoint_key"] not in state.get("completed_checkpoints", []):
+        st.markdown(f"""
+        <div class='checkpoint-box'>
+            <div class='cp-label'>Checkpoint — {current_cp['checkpoint_key']}</div>
+            <div style='font-size:1rem;color:#2c2c2c;font-weight:500;margin:.5rem 0;'>
+                {current_cp['prompt_to_student']}</div>
+        </div>""", unsafe_allow_html=True)
+
+        with st.form(key=f"cp_form_{current_cp['checkpoint_key']}"):
+            submission = st.text_area("Your answer", height=120,
+                                      placeholder="Write your response here...")
+            submitted = st.form_submit_button("Submit Checkpoint", type="primary")
+            if submitted and submission.strip():
+                with st.spinner("Evaluating your submission..."):
+                    eval_result = submit_checkpoint(
+                        session_id, case_id,
+                        current_cp["checkpoint_key"],
+                        submission, user_id
+                    )
+                if eval_result.get("is_passed"):
+                    st.markdown(f"""
+                    <div class='success-strip'>
+                        <strong>Passed</strong> · Score: {eval_result.get('score',0)}/100<br>
+                        {eval_result.get('feedback','')}
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class='warn-strip'>
+                        <strong>Not yet</strong> · Score: {eval_result.get('score',0)}/100<br>
+                        {eval_result.get('feedback','')}<br>
+                        <em>{', '.join(eval_result.get('suggestions',[]))}</em>
+                    </div>""", unsafe_allow_html=True)
+                st.rerun()
+
+    elif not current_cp:
+        st.markdown("""
+        <div class='success-strip'>
+            All checkpoints complete. You can finalize the case to receive your report.
+        </div>""", unsafe_allow_html=True)
+
+        if not session.get("ended_at") and not is_test:
+            if st.button("🏁 Finalize Case & Generate Report", type="primary"):
+                finalize_session(session_id)
+                with st.spinner("Generating your performance report..."):
+                    try:
+                        report = generate_report(session_id, case_id, user_id)
+                        st.session_state.show_report = report
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Report error: {str(e)}")
+
+    # Chat input
+    if not session.get("ended_at") or is_test:
+        user_input = st.chat_input("Ask a question or explore the case...")
+        if user_input:
+            with st.spinner("Thinking..."):
+                try:
+                    process_chat_turn(session_id, case_id, user_input, user_id)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+    # Final report display
+    if st.session_state.get("show_report"):
+        report = st.session_state.show_report
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown("<h2>Your Performance Report</h2>", unsafe_allow_html=True)
+        total = report.get("total_score", 0)
+
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            st.markdown(f"""
+            <div class='score-ring' style='margin-top:1rem;'>
+                <div class='score-num'>{total}</div>
+                <div class='score-pct'>/ 100</div>
+            </div>""", unsafe_allow_html=True)
+        with col2:
+            st.markdown(f"**Summary:** {report.get('summary','')}")
+            if report.get("scores"):
+                for cat, details in report["scores"].items():
+                    score = details.get("score",0) if isinstance(details,dict) else details
+                    fb = details.get("feedback","") if isinstance(details,dict) else ""
+                    st.markdown(f"**{cat}:** {score}/100 — {fb}")
+
+        if report.get("improvement_areas"):
+            st.markdown("**Areas to Improve:**")
+            for area in report["improvement_areas"]:
+                st.markdown(f"- {area}")
+
+        html = export_report_html({"data": report}, st.session_state.get("username","Student"))
+        st.download_button(
+            "📥 Download Full Report (HTML)",
+            html,
+            file_name=f"report_{session_id}.html",
+            mime="text/html",
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PROFESSOR INTERFACE
 # ══════════════════════════════════════════════════════════════════════════════
 if role == "Professor":
@@ -815,168 +980,4 @@ elif role == "Student":
                                     unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SHARED: Case Chat Renderer (semi-guided, phase-by-phase)
-# ══════════════════════════════════════════════════════════════════════════════
-def _render_case_chat(session_id: int, case_id: int, user_id: int, is_test: bool = False):
-    session = get_session(session_id)
-    case = get_case(case_id)
-    blueprint = get_latest_blueprint(case_id)
 
-    if not session or not case or not blueprint:
-        st.error("Session or case data not found.")
-        return
-
-    state = session["state"]
-    phases = blueprint.get("phases", [])
-    total_cps = sum(len(p.get("checkpoints", [])) for p in phases)
-    completed_cps = len(state.get("completed_checkpoints", []))
-
-    # Header
-    st.markdown(f"<h2>{case['title']}</h2>", unsafe_allow_html=True)
-
-    # Progress bar
-    pct = int((completed_cps / total_cps) * 100) if total_cps > 0 else 0
-    phase_num = state.get("current_phase", 1)
-    phase_title = next(
-        (p.get("phase_title", f"Phase {p['phase_id']}") for p in phases
-         if p.get("phase_id") == phase_num), f"Phase {phase_num}"
-    )
-    st.markdown(f"""
-    <div style='margin-bottom:1.5rem;'>
-        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem;'>
-            <span style='font-size:.8rem;font-weight:600;color:#6a6460;text-transform:uppercase;
-                letter-spacing:.8px;'>{phase_title}</span>
-            <span style='font-size:.8rem;color:#8b8680;'>
-                {completed_cps}/{total_cps} checkpoints</span>
-        </div>
-        <div class='progress-bar-wrap'>
-            <div class='progress-bar-fill' style='width:{pct}%;'></div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Phase intro (narrator) — show once when phase starts
-    if not state.get("phase_introduced"):
-        intro = get_phase_intro(blueprint, phase_num)
-        if intro:
-            st.markdown(f"""
-            <div class='phase-header'>
-                <div class='phase-num'>Phase {phase_num} · {phase_title}</div>
-                <div class='phase-title' style='font-size:1rem;margin-top:.3rem;color:#5a5a5a;
-                    font-family:"DM Sans",sans-serif;font-weight:400;'>{intro}</div>
-            </div>""", unsafe_allow_html=True)
-            # Mark phase as introduced
-            state["phase_introduced"] = True
-            save_session_state(session_id, state)
-
-    # Chat transcript
-    transcript = get_session_transcript(session_id)
-    for msg in transcript:
-        avatar = "🎓" if msg["role"] == "assistant" else "👤"
-        with st.chat_message(msg["role"] if msg["role"] != "student" else "user",
-                             avatar=avatar if msg["role"] == "assistant" else None):
-            st.markdown(msg["content"])
-            if msg.get("citations"):
-                st.caption(f"Sources: chunks {', '.join(map(str, msg['citations']))}")
-
-    # Current checkpoint
-    current_cp = get_current_checkpoint(blueprint, state)
-
-    if current_cp and current_cp["checkpoint_key"] not in state.get("completed_checkpoints", []):
-        st.markdown(f"""
-        <div class='checkpoint-box'>
-            <div class='cp-label'>Checkpoint — {current_cp['checkpoint_key']}</div>
-            <div style='font-size:1rem;color:#2c2c2c;font-weight:500;margin:.5rem 0;'>
-                {current_cp['prompt_to_student']}</div>
-        </div>""", unsafe_allow_html=True)
-
-        with st.form(key=f"cp_form_{current_cp['checkpoint_key']}"):
-            submission = st.text_area("Your answer", height=120,
-                                      placeholder="Write your response here...")
-            submitted = st.form_submit_button("Submit Checkpoint", type="primary")
-            if submitted and submission.strip():
-                with st.spinner("Evaluating your submission..."):
-                    eval_result = submit_checkpoint(
-                        session_id, case_id,
-                        current_cp["checkpoint_key"],
-                        submission, user_id
-                    )
-                if eval_result.get("is_passed"):
-                    st.markdown(f"""
-                    <div class='success-strip'>
-                        <strong>Passed</strong> · Score: {eval_result.get('score',0)}/100<br>
-                        {eval_result.get('feedback','')}
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class='warn-strip'>
-                        <strong>Not yet</strong> · Score: {eval_result.get('score',0)}/100<br>
-                        {eval_result.get('feedback','')}<br>
-                        <em>{', '.join(eval_result.get('suggestions',[]))}</em>
-                    </div>""", unsafe_allow_html=True)
-                st.rerun()
-
-    elif not current_cp:
-        # All checkpoints done
-        st.markdown("""
-        <div class='success-strip'>
-            All checkpoints complete. You can finalize the case to receive your report.
-        </div>""", unsafe_allow_html=True)
-
-        if not session.get("ended_at") and not is_test:
-            if st.button("🏁 Finalize Case & Generate Report", type="primary"):
-                finalize_session(session_id)
-                with st.spinner("Generating your performance report..."):
-                    try:
-                        report = generate_report(session_id, case_id, user_id)
-                        st.session_state.show_report = report
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Report error: {str(e)}")
-
-    # Chat input
-    if not session.get("ended_at") or is_test:
-        user_input = st.chat_input("Ask a question or explore the case...")
-        if user_input:
-            with st.spinner("Thinking..."):
-                try:
-                    process_chat_turn(session_id, case_id, user_input, user_id)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-
-    # Final report display
-    if st.session_state.get("show_report"):
-        report = st.session_state.show_report
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown("<h2>Your Performance Report</h2>", unsafe_allow_html=True)
-        total = report.get("total_score", 0)
-
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            st.markdown(f"""
-            <div class='score-ring' style='margin-top:1rem;'>
-                <div class='score-num'>{total}</div>
-                <div class='score-pct'>/ 100</div>
-            </div>""", unsafe_allow_html=True)
-        with col2:
-            st.markdown(f"**Summary:** {report.get('summary','')}")
-            if report.get("scores"):
-                for cat, details in report["scores"].items():
-                    score = details.get("score",0) if isinstance(details,dict) else details
-                    fb = details.get("feedback","") if isinstance(details,dict) else ""
-                    st.markdown(f"**{cat}:** {score}/100 — {fb}")
-
-        if report.get("improvement_areas"):
-            st.markdown("**Areas to Improve:**")
-            for area in report["improvement_areas"]:
-                st.markdown(f"- {area}")
-
-        html = export_report_html({"data": report}, st.session_state.get("username","Student"))
-        st.download_button(
-            "📥 Download Full Report (HTML)",
-            html,
-            file_name=f"report_{session_id}.html",
-            mime="text/html",
-        )
