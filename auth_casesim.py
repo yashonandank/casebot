@@ -133,6 +133,17 @@ def init_db():
         )
     """)
 
+    # Migration: add columns that may be missing from older DB versions
+    migrations = [
+        "ALTER TABLE case_chunks ADD COLUMN embedding_json TEXT",
+        "ALTER TABLE checkpoint_submissions ADD COLUMN feedback TEXT",
+    ]
+    for migration in migrations:
+        try:
+            cursor.execute(migration)
+        except Exception:
+            pass  # Column already exists
+
     conn.commit()
     conn.close()
 

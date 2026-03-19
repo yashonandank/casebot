@@ -417,7 +417,7 @@ if role == "Professor":
                     <div style='font-size:1.1rem;font-weight:600;color:#2c2c2c;'>
                         {st.session_state.get('w_title','')}</div>
                     <div style='font-size:.9rem;color:#6a6460;margin-top:.3rem;'>
-                        {st.session_state.get('w_course','')} · {st.session_state.get('w_hint','')} coaching</div>
+                        {st.session_state.get('w_course','')} · {st.session_state.get('w_hint','')}</div>
                 </div>""", unsafe_allow_html=True)
 
             cps = st.session_state.get("w_checkpoints_final", [])
