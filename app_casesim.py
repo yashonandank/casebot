@@ -242,38 +242,45 @@ def _render_case_chat(session_id: int, case_id: int, user_id: int, is_test: bool
     current_cp = get_current_checkpoint(blueprint, state)
 
     if current_cp and current_cp["checkpoint_key"] not in state.get("completed_checkpoints", []):
+        cp_key = current_cp["checkpoint_key"]
         st.markdown(f"""
         <div class='checkpoint-box'>
-            <div class='cp-label'>Checkpoint — {current_cp['checkpoint_key']}</div>
+            <div class='cp-label'>Checkpoint — {cp_key}</div>
             <div style='font-size:1rem;color:#2c2c2c;font-weight:500;margin:.5rem 0;'>
                 {current_cp['prompt_to_student']}</div>
         </div>""", unsafe_allow_html=True)
 
-        with st.form(key=f"cp_form_{current_cp['checkpoint_key']}"):
+        # Show previous evaluation feedback if any (persisted across rerun)
+        eval_key = f"cp_eval_{session_id}_{cp_key}"
+        last_eval = st.session_state.get(eval_key)
+        if last_eval:
+            if last_eval.get("is_passed"):
+                st.markdown(f"""
+                <div class='success-strip'>
+                    <strong>Passed</strong> · Score: {last_eval.get('score',0)}/100<br>
+                    {last_eval.get('feedback','')}
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class='warn-strip'>
+                    <strong>Not quite</strong> · Score: {last_eval.get('score',0)}/100<br>
+                    {last_eval.get('feedback','')}<br>
+                    <em>{', '.join(last_eval.get('suggestions',[]))}</em>
+                </div>""", unsafe_allow_html=True)
+
+        # Form — submission handled OUTSIDE so st.rerun() fires correctly
+        with st.form(key=f"cp_form_{session_id}_{cp_key}"):
             submission = st.text_area("Your answer", height=120,
                                       placeholder="Write your response here...")
             submitted = st.form_submit_button("Submit Checkpoint", type="primary")
-            if submitted and submission.strip():
-                with st.spinner("Evaluating your submission..."):
-                    eval_result = submit_checkpoint(
-                        session_id, case_id,
-                        current_cp["checkpoint_key"],
-                        submission, user_id
-                    )
-                if eval_result.get("is_passed"):
-                    st.markdown(f"""
-                    <div class='success-strip'>
-                        <strong>Passed</strong> · Score: {eval_result.get('score',0)}/100<br>
-                        {eval_result.get('feedback','')}
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class='warn-strip'>
-                        <strong>Not yet</strong> · Score: {eval_result.get('score',0)}/100<br>
-                        {eval_result.get('feedback','')}<br>
-                        <em>{', '.join(eval_result.get('suggestions',[]))}</em>
-                    </div>""", unsafe_allow_html=True)
-                st.rerun()
+
+        if submitted and submission.strip():
+            with st.spinner("Evaluating your submission..."):
+                eval_result = submit_checkpoint(
+                    session_id, case_id, cp_key, submission, user_id
+                )
+            st.session_state[eval_key] = eval_result
+            st.rerun()
 
     elif not current_cp:
         st.markdown("""
