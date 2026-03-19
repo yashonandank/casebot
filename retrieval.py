@@ -1,128 +1,76 @@
 import sqlite3
+import json
 import math
 from typing import List, Dict
-from collections import Counter
 
 
-def simple_tokenize(text: str) -> List[str]:
-    """Basic tokenization: lowercase, split on whitespace, remove short tokens."""
-    tokens = text.lower().split()
-    return [t for t in tokens if len(t) > 2]
-
-
-def compute_tf(tokens: List[str]) -> Dict[str, float]:
-    """Compute term frequency."""
-    counter = Counter(tokens)
-    total = len(tokens)
-    return {term: count / total for term, count in counter.items()} if total > 0 else {}
-
-
-def compute_idf(all_docs: List[List[str]]) -> Dict[str, float]:
-    """Compute inverse document frequency across all documents."""
-    num_docs = len(all_docs)
-    doc_frequency = Counter()
-    
-    for doc in all_docs:
-        unique_terms = set(doc)
-        for term in unique_terms:
-            doc_frequency[term] += 1
-    
-    idf = {}
-    for term, count in doc_frequency.items():
-        idf[term] = math.log(num_docs / (count + 1))  # +1 to avoid division by zero
-    
-    return idf
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 def retrieve_chunks(
     case_id: int,
     query: str,
     top_k: int = 5,
-    min_score: float = 0.0
 ) -> List[Dict]:
     """
-    Retrieve top-k case chunks most relevant to query using TF-IDF scoring.
-    Returns list of chunks with scores.
+    Embed the query and return top-k chunks by cosine similarity.
+    Falls back to keyword overlap if no embeddings stored.
     """
+    from llm_client import get_llm_client
+    llm = get_llm_client()
+
+    # Embed query
+    query_embedding = llm.embed([query])[0]
+
     db_path = "data/db/casesim.db"
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
-    # Get all chunks for this case
+
     cursor.execute("""
-        SELECT id, chunk_index, location_hint, content
-        FROM case_chunks
-        WHERE case_id = ?
+        SELECT id, chunk_index, location_hint, content, embedding_json
+        FROM case_chunks WHERE case_id = ?
         ORDER BY chunk_index
     """, (case_id,))
-    
-    chunks = []
-    all_docs = []
-    
-    for chunk_id, idx, location, content in cursor.fetchall():
-        chunks.append({
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        return []
+
+    scored = []
+    for chunk_id, idx, location, content, emb_json in rows:
+        if emb_json:
+            embedding = json.loads(emb_json)
+            score = _cosine_similarity(query_embedding, embedding)
+        else:
+            # Keyword fallback
+            q_words = set(query.lower().split())
+            c_words = set(content.lower().split())
+            score = len(q_words & c_words) / max(len(q_words), 1)
+
+        scored.append({
             "chunk_id": chunk_id,
             "chunk_index": idx,
             "location_hint": location,
             "content": content,
-            "tokens": simple_tokenize(content)
+            "score": score,
         })
-        all_docs.append(chunks[-1]["tokens"])
-    
-    conn.close()
-    
-    if not chunks:
-        return []
-    
-    # Compute IDF
-    idf = compute_idf(all_docs)
-    
-    # Tokenize query
-    query_tokens = simple_tokenize(query)
-    query_tf = compute_tf(query_tokens)
-    
-    # Score each chunk
-    scored_chunks = []
-    for chunk in chunks:
-        chunk_tf = compute_tf(chunk["tokens"])
-        
-        # TF-IDF score
-        score = 0.0
-        for term in query_tokens:
-            tf = chunk_tf.get(term, 0)
-            idf_val = idf.get(term, 0)
-            score += tf * idf_val
-        
-        if score >= min_score:
-            scored_chunks.append({
-                **chunk,
-                "score": score
-            })
-    
-    # Sort by score descending
-    scored_chunks.sort(key=lambda x: x["score"], reverse=True)
-    
-    # Return top-k, without tokens in result
-    result = []
-    for chunk in scored_chunks[:top_k]:
-        result.append({
-            "chunk_id": chunk["chunk_id"],
-            "chunk_index": chunk["chunk_index"],
-            "location_hint": chunk["location_hint"],
-            "content": chunk["content"],
-            "score": chunk["score"]
-        })
-    
-    return result
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return [
+        {k: v for k, v in c.items() if k != "score"}
+        | {"score": c["score"]}
+        for c in scored[:top_k]
+    ]
 
 
-def search_case_text(
-    case_id: int,
-    query: str,
-    top_k: int = 5
-) -> List[Dict]:
-    """User-friendly search interface."""
+def search_case_text(case_id: int, query: str, top_k: int = 5) -> List[Dict]:
     if not query or not query.strip():
         return []
-    
-    return retrieve_chunks(case_id, query, top_k=top_k, min_score=0.0)
+    return retrieve_chunks(case_id, query, top_k=top_k)

@@ -3,156 +3,110 @@ import os
 from typing import Optional, Dict, Any, List
 import streamlit as st
 
+
 class LLMClient:
-    """Provider-agnostic LLM wrapper for JSON generation and chat."""
-    
-    def __init__(self, provider: str = "anthropic"):
-        """Initialize with provider ('anthropic' or 'openai')."""
-        self.provider = provider
-        self._load_secrets()
-    
-    def _load_secrets(self):
-        """Load API keys from environment or Streamlit secrets."""
+    """OpenAI GPT-4o wrapper for JSON generation and chat."""
+
+    def __init__(self):
+        self._load_client()
+
+    def _load_client(self):
         try:
-            # Try to get provider from secrets, default to openai
-            provider = st.secrets.get("LLM_PROVIDER", "openai") if hasattr(st, 'secrets') else os.getenv("LLM_PROVIDER", "openai")
-            self.provider = provider
-            
-            if self.provider == "anthropic":
-                self.api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-                if not self.api_key:
-                    raise ValueError("ANTHROPIC_API_KEY not found in secrets or environment")
-                from anthropic import Anthropic
-                self.client = Anthropic(api_key=self.api_key)
-            elif self.provider == "openai":
-                self.api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-                if not self.api_key:
-                    raise ValueError("OPENAI_API_KEY not found in secrets or environment")
-                from openai import OpenAI
-                self.client = OpenAI(api_key=self.api_key)
-            else:
-                raise ValueError(f"Unknown provider: {self.provider}")
+            api_key = (
+                st.secrets.get("OPENAI_API_KEY")
+                if hasattr(st, "secrets")
+                else os.getenv("OPENAI_API_KEY")
+            )
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not found in secrets or environment")
+            os.environ["OPENAI_API_KEY"] = api_key
+            from openai import OpenAI
+            self.client = OpenAI(api_key=api_key)
         except Exception as e:
             st.error(f"LLM initialization error: {str(e)}")
             raise
-    
-    def generate_json(self, prompt: str, schema_hint: str = "") -> Dict[str, Any]:
-        """Generate JSON from a prompt."""
-        full_prompt = f"{prompt}\n\nReturn ONLY valid JSON matching this structure:\n{schema_hint}"
-        
-        if self.provider == "anthropic":
-            response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=4096,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": full_prompt
-                    }
-                ]
-            )
-            text = response.content[0].text
-        else:  # openai
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                max_tokens=4096,
-                temperature=1,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": full_prompt
-                    }
-                ]
-            )
-            text = response.choices[0].message.content
-        
-        return self._parse_json(text)
-    
+
+    def generate_json(self, prompt: str) -> Dict[str, Any]:
+        """Generate a JSON response from a prompt."""
+        response = self.client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=4096,
+            temperature=0.3,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return self._parse_json(response.choices[0].message.content)
+
+    def chat(
+        self,
+        system_prompt: str,
+        messages: List[Dict],
+        temperature: float = 0.5,
+    ) -> str:
+        """Multi-turn chat, returns raw text."""
+        response = self.client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=2048,
+            temperature=temperature,
+            messages=[{"role": "system", "content": system_prompt}] + messages,
+        )
+        return response.choices[0].message.content
+
     def chat_json(
         self,
         system_prompt: str,
-        user_message: str,
-        tools: Optional[List[Dict]] = None,
-        temperature: float = 0.7
+        messages: List[Dict],
+        temperature: float = 0.4,
     ) -> Dict[str, Any]:
-        """Chat completion returning JSON."""
-        if self.provider == "anthropic":
-            messages = [{"role": "user", "content": user_message}]
-            response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=4096,
-                system=system_prompt,
-                temperature=temperature,
-                messages=messages
-            )
-            text = response.content[0].text
-        else:  # openai
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ]
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                max_tokens=4096,
-                temperature=temperature,
-                messages=messages
-            )
-            text = response.choices[0].message.content
-        
+        """Multi-turn chat returning JSON."""
+        text = self.chat(system_prompt, messages, temperature)
         return self._parse_json(text)
-    
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """Embed a list of texts using text-embedding-3-small."""
+        response = self.client.embeddings.create(
+            model="text-embedding-3-small",
+            input=texts,
+        )
+        return [item.embedding for item in response.data]
+
     def _parse_json(self, text: str) -> Dict[str, Any]:
-        """Parse JSON from response, with fallback repair."""
+        """Parse JSON from response, stripping markdown fences."""
+        text = text.strip()
+        for fence in ["```json", "```"]:
+            if fence in text:
+                start = text.find(fence) + len(fence)
+                end = text.find("```", start)
+                if end > start:
+                    text = text[start:end].strip()
+                    break
         try:
-            # Try direct parse
             return json.loads(text)
         except json.JSONDecodeError:
-            # Try extracting JSON from markdown code blocks
-            if "```json" in text:
-                start = text.find("```json") + 7
-                end = text.find("```", start)
-                if end > start:
-                    try:
-                        return json.loads(text[start:end].strip())
-                    except json.JSONDecodeError:
-                        pass
-            elif "```" in text:
-                start = text.find("```") + 3
-                end = text.find("```", start)
-                if end > start:
-                    try:
-                        return json.loads(text[start:end].strip())
-                    except json.JSONDecodeError:
-                        pass
-            
-            # Try repair prompt
-            repair_prompt = f"""The following text should be valid JSON but is not. 
-Please repair it to be valid JSON and return ONLY the corrected JSON:
-
-{text}"""
-            
-            if self.provider == "anthropic":
-                repair_response = self.client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=4096,
-                    messages=[{"role": "user", "content": repair_prompt}]
-                )
-                repaired_text = repair_response.content[0].text
-            else:
-                repair_response = self.client.chat.completions.create(
-                    model="gpt-4o",
-                    max_tokens=4096,
-                    temperature=1,
-                    messages=[{"role": "user", "content": repair_prompt}]
-                )
-                repaired_text = repair_response.choices[0].message.content
-            
+            # Attempt repair
+            repair_response = self.client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=4096,
+                temperature=0,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "The following should be valid JSON but is malformed. "
+                        "Return ONLY the corrected JSON with no explanation:\n\n" + text
+                    )
+                }],
+            )
             try:
-                return json.loads(repaired_text)
+                return json.loads(repair_response.choices[0].message.content.strip())
             except json.JSONDecodeError as e:
-                raise ValueError(f"Could not parse or repair JSON: {str(e)}")
+                raise ValueError(f"Could not parse or repair JSON: {e}")
 
 
-def get_llm_client(provider: str = "openai") -> LLMClient:
-    """Factory function to get LLM client. Defaults to OpenAI."""
-    return LLMClient(provider)
+_client: Optional[LLMClient] = None
+
+
+def get_llm_client() -> LLMClient:
+    """Singleton LLM client factory."""
+    global _client
+    if _client is None:
+        _client = LLMClient()
+    return _client

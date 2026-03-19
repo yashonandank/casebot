@@ -5,130 +5,148 @@ def blueprint_generator_prompt(
     professor_instructions: str,
     checkpoints: list,
     rubric: dict,
-    extracted_text: str
+    extracted_text: str,
 ) -> str:
-    """Generate prompt for creating case blueprint."""
     return f"""You are an expert instructional designer creating an interactive case simulation blueprint.
 
 PROFESSOR INSTRUCTIONS:
 {professor_instructions}
 
-DEFINED CHECKPOINTS (that student must complete):
+DEFINED CHECKPOINTS (student must complete these):
 {json.dumps(checkpoints, indent=2)}
 
 RUBRIC CATEGORIES & WEIGHTS:
 {json.dumps(rubric, indent=2)}
 
-EXTRACTED CASE TEXT (use ONLY this content):
+FULL CASE TEXT:
 {extracted_text}
 
-Create a comprehensive case blueprint JSON with this structure:
+Create a comprehensive case blueprint JSON:
 {{
   "metadata": {{
-    "title": "case title",
+    "title": "case title from the text",
     "estimated_minutes": 60,
     "difficulty": "intermediate"
   }},
-  "narrator_style": "consulting-like",
+  "narrator_style": "professional consulting narrator",
   "phases": [
     {{
       "phase_id": 1,
-      "phase_goal": "understand the situation",
-      "context_reveal_rules": "what info becomes available",
+      "phase_title": "short title",
+      "phase_goal": "what student should understand by end of phase",
+      "narrator_intro": "2-3 sentence introduction the narrator tells the student at the start of this phase, grounding them in the context they have access to",
+      "context_chunks_hint": "keywords from the case text relevant to this phase",
       "checkpoints": [
         {{
-          "checkpoint_key": "id",
-          "prompt_to_student": "what to do",
-          "required_submission_type": "short_answer|choose_one|upload_text",
-          "evaluation_notes": "INSTRUCTOR_ONLY: how to evaluate",
-          "progression_rule": "when checkpoint passes"
+          "checkpoint_key": "unique_key",
+          "prompt_to_student": "clear question for student",
+          "required_submission_type": "short_answer",
+          "evaluation_notes": "INSTRUCTOR_ONLY: criteria for passing",
+          "progression_rule": "student demonstrates understanding"
         }}
-      ],
-      "decision_points": []
+      ]
     }}
   ],
-  "roles": ["narrator"],
   "rubric": {json.dumps(rubric)},
-  "integrity_rules": "strict|coaching|open",
-  "grounding_rules": "must cite chunks; ask clarifying questions if unsupported"
+  "integrity_rules": "coaching",
+  "grounding_rules": "cite chunk IDs; ask clarifying questions if unsupported"
 }}
 
 CRITICAL:
-- Do NOT invent information outside the case text
-- Make checkpoints match the professor-defined ones (enhance wording if needed)
-- Define phases that guide student from problem understanding to solution
-- Mark all instructor-only content clearly
-- Ensure checkpoint keys are unique
-- Return ONLY valid JSON, no markdown or explanation
+- Use ALL case text to build phases — do not summarize or skip sections
+- narrator_intro must set the scene for each phase naturally (like a real case briefing)
+- Phases should flow from problem framing → analysis → recommendation
+- Map professor checkpoints to the right phases
+- Return ONLY valid JSON, no markdown
 """
 
 
-def simulation_chat_prompt(
+def checkpoint_suggestion_prompt(extracted_text: str, objectives: list) -> str:
+    """Prompt for AI to suggest checkpoints and rubric from case text."""
+    return f"""You are a business school professor designing a case study simulation.
+
+LEARNING OBJECTIVES:
+{json.dumps(objectives, indent=2)}
+
+CASE TEXT (excerpt):
+{extracted_text[:3000]}
+
+Suggest a set of checkpoints and a rubric for this case simulation.
+
+Return ONLY this JSON:
+{{
+  "suggested_checkpoints": [
+    {{
+      "checkpoint_key": "snake_case_key",
+      "prompt_to_student": "Question the student must answer",
+      "required_submission_type": "short_answer",
+      "evaluation_notes": "What a strong answer looks like"
+    }}
+  ],
+  "suggested_rubric": {{
+    "Category Name": {{"weight": 0.4, "description": "what this measures"}},
+    "Category Name 2": {{"weight": 0.35, "description": "..."}},
+    "Category Name 3": {{"weight": 0.25, "description": "..."}}
+  }},
+  "suggested_hint_policy": "coaching"
+}}
+
+Guidelines:
+- 3-6 checkpoints that build from diagnosis → analysis → recommendation
+- Rubric weights must sum to 1.0
+- Checkpoints should cover the key learning objectives
+"""
+
+
+def simulation_system_prompt(
     blueprint: dict,
-    session_state: dict,
-    retrieved_chunks: list,
-    student_message: str,
-    hint_policy: str
+    hint_policy: str,
 ) -> str:
-    """Generate prompt for case simulation chat turn."""
-    chunk_text = "\n---\n".join([f"[CHUNK {c['chunk_id']}] {c['content']}" for c in retrieved_chunks])
-    
-    hint_policy_guidance = {
-        "strict": "Only ask guiding questions. Never provide answers. Explain tradeoffs.",
-        "coaching": "Provide structured guidance and frameworks but not the solution.",
-        "open": "Can offer more direct suggestions but still ground in case and cite sources."
+    """System prompt for the case simulation facilitator."""
+    hint_guidance = {
+        "strict": "Only ask guiding questions. Never give answers. Push back on weak reasoning.",
+        "coaching": "Provide structured guidance and frameworks but not the solution. Acknowledge good thinking.",
+        "open": "You may offer more direct suggestions but still ground every claim in the case.",
     }
-    
-    return f"""You are a consulting case simulation facilitator. Your role is to guide the student through a realistic business case.
+    return f"""You are a professional consulting case simulation facilitator at a top business school.
 
 CASE BLUEPRINT:
 {json.dumps(blueprint, indent=2)}
 
-CURRENT SESSION STATE:
-{json.dumps(session_state, indent=2)}
-
-AVAILABLE CASE CONTENT (cite these chunks when making claims):
-{chunk_text}
-
-STUDENT MESSAGE:
-{student_message}
-
 INTEGRITY POLICY: {hint_policy}
-{hint_policy_guidance.get(hint_policy, hint_policy_guidance['coaching'])}
+{hint_guidance.get(hint_policy, hint_guidance['coaching'])}
 
 GROUNDING RULES:
-- Every factual claim MUST be supported by a chunk ID
-- If student asks "what's the answer", respond by coaching instead
-- If a chunk is missing, ask student to point you to relevant section
-- Do NOT invent facts beyond the case
+- Every factual claim about the case MUST cite a chunk ID like [CHUNK 3]
+- If the student asks for a direct answer, coach instead
+- If relevant information isn't in the retrieved chunks, say so honestly
+- Stay in character as a professional narrator/facilitator
 
-Respond with ONLY this JSON structure:
+RESPONSE FORMAT — return ONLY this JSON:
 {{
-  "assistant_message": "your response (must be grounded in chunks)",
+  "assistant_message": "your response to the student (markdown ok, cite [CHUNK N])",
   "state_update": {{
     "current_phase": 1,
     "checkpoint_pointer": 0
   }},
   "checkpoint_due": null,
-  "citations": [1, 3, 5],
-  "integrity_flag": null,
-  "grounding_issues": []
+  "citations": [1, 3],
+  "integrity_flag": null
 }}
 
-If student_message requests an answer directly, set integrity_flag with coaching strategy.
-If response lacks citations, explain you need to find supporting evidence first.
+If student asks for a direct answer: set integrity_flag to a brief coaching note.
+If student completes enough analysis for a checkpoint: set checkpoint_due to the checkpoint_key.
 """
 
 
 def checkpoint_evaluator_prompt(
     checkpoint_definition: dict,
     student_submission: str,
-    rubric: dict
+    rubric: dict,
 ) -> str:
-    """Generate prompt for evaluating checkpoint submission."""
-    return f"""You are grading a student's checkpoint submission in a case simulation.
+    return f"""You are a business school professor grading a student's case checkpoint submission.
 
-CHECKPOINT DEFINITION:
+CHECKPOINT:
 {json.dumps(checkpoint_definition, indent=2)}
 
 STUDENT SUBMISSION:
@@ -137,16 +155,17 @@ STUDENT SUBMISSION:
 RUBRIC:
 {json.dumps(rubric, indent=2)}
 
-Evaluate and respond with ONLY this JSON:
+Evaluate and return ONLY this JSON:
 {{
-  "is_passed": true|false,
-  "score": 0-100,
-  "feedback": "specific guidance for next steps",
-  "reasoning": "why passed/failed",
-  "suggestions": ["actionable improvement"]
+  "is_passed": true,
+  "score": 78,
+  "feedback": "Constructive, specific feedback in 2-3 sentences",
+  "suggestions": ["One concrete improvement"],
+  "reasoning": "Brief internal note on why passed/failed"
 }}
 
-Be fair and constructive. Checkpoint passes if student demonstrates understanding of core concept.
+Passing threshold: student demonstrates genuine understanding of the core concept.
+Be fair and constructive. A passing score is 60+.
 """
 
 
@@ -155,21 +174,19 @@ def report_generator_prompt(
     transcript: list,
     checkpoint_submissions: list,
     rubric: dict,
-    retrieved_evidence: list
+    retrieved_evidence: list,
 ) -> str:
-    """Generate prompt for final report generation."""
     evidence_text = "\n".join([
-        f"- [{c['chunk_id']}] {c['content'][:200]}..."
+        f"[CHUNK {c['chunk_id']}] {c['content'][:200]}..."
         for c in retrieved_evidence
     ])
-    
-    return f"""You are creating a final feedback report for a student who completed a case simulation.
+    return f"""You are generating a final performance report for a student who completed a business case simulation.
 
 CASE BLUEPRINT:
 {json.dumps(case_blueprint, indent=2)}
 
-STUDENT TRANSCRIPT (conversation history):
-{json.dumps(transcript[-10:], indent=2)}  # Last 10 messages
+RECENT TRANSCRIPT (last 10 messages):
+{json.dumps(transcript[-10:], indent=2)}
 
 CHECKPOINT SUBMISSIONS:
 {json.dumps(checkpoint_submissions, indent=2)}
@@ -180,28 +197,28 @@ RUBRIC:
 SUPPORTING EVIDENCE FROM CASE:
 {evidence_text}
 
-Generate ONLY this JSON structure:
+Generate ONLY this JSON:
 {{
   "title": "Case Performance Report",
-  "summary": "overall assessment (2-3 sentences)",
+  "summary": "Overall 2-3 sentence assessment",
   "scores": {{
-    "category_name": {{
-      "score": 0-100,
-      "feedback": "specific strengths and areas for improvement"
+    "Category Name": {{
+      "score": 82,
+      "feedback": "specific strengths and areas to improve"
     }}
   }},
-  "total_score": 0-100,
-  "decision_quality": "analysis of student's key decisions",
-  "improvement_areas": ["specific actionable feedback"],
+  "total_score": 79,
+  "decision_quality": "Analysis of the student's key decisions and reasoning quality",
+  "improvement_areas": ["Specific actionable feedback item"],
   "citations": [
     {{
       "chunk_id": 1,
-      "snippet": "relevant quote",
-      "relevance": "why it matters"
+      "snippet": "brief relevant quote",
+      "relevance": "why this matters for the assessment"
     }}
   ],
-  "next_steps": "recommendations for continued learning"
+  "next_steps": "Recommendations for continued learning"
 }}
 
-Be constructive and evidence-based. Reference specific chunks for credibility.
+Be evidence-based and constructive. Reference specific chunks and checkpoint results.
 """
